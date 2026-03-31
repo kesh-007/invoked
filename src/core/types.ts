@@ -66,11 +66,45 @@ export interface MemoryConfig {
   longTerm?: number | false;
 }
 
+// ─── MCP ──────────────────────────────────────────────────────────────────────
+
+export type McpStdioServerConfig = {
+  type?: "stdio";
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+};
+
+export type McpSseServerConfig = {
+  type: "sse";
+  url: string;
+  headers?: Record<string, string>;
+};
+
+export type McpServerConfig = McpStdioServerConfig | McpSseServerConfig;
+
 // ─── Agent Config ─────────────────────────────────────────────────────────────
 
 export interface AgentConfig {
   name: string;
   instructions: string | ((ctx: InputContext) => string);
+
+  /**
+   * Claude model to use. Accepts a model alias or a full model ID.
+   * Defaults to the model you have active in Claude Code.
+   *
+   * Aliases:  'sonnet' | 'opus' | 'haiku'
+   * Full IDs: 'claude-sonnet-4-6' | 'claude-opus-4-6' | 'claude-haiku-4-5-20251001'
+   */
+  model?: string;
+
+  /**
+   * Set to `false` to disable session persistence — every call is completely
+   * independent with no history loaded or saved. Ideal for one-shot tasks like
+   * summarization, classification, or formatting.
+   * Defaults to true.
+   */
+  memory?: boolean;
 
   /**
    * Enable the agent's internal scratchpad.
@@ -92,6 +126,22 @@ export interface AgentConfig {
    * Each skill is auto-exposed as a callable tool named `skill_<name>`.
    */
   skills?: SkillDef[];
+
+  /**
+   * External MCP servers the agent can call tools from.
+   * Supports stdio (local process) and SSE (remote HTTP) transports.
+   *
+   * @example — local filesystem server
+   * mcpServers: {
+   *   filesystem: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "./"] }
+   * }
+   *
+   * @example — remote SSE server
+   * mcpServers: {
+   *   myApi: { type: "sse", url: "https://my-mcp-server.com/sse" }
+   * }
+   */
+  mcpServers?: Record<string, McpServerConfig>;
 
   /** Transform the message before the agent sees it */
   inputPipeline?: InputMiddleware[];

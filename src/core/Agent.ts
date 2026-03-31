@@ -1,4 +1,5 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import type { McpServerConfig as SdkMcpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { z } from "zod";
@@ -80,8 +81,9 @@ export class Agent {
       options: {
         systemPrompt: ctx.systemPrompt,
         allowedTools: ctx.allowedTools,
+        ...(this.cfg.model ? { model: this.cfg.model } : {}),
         ...(ctx.prevSession ? { resume: ctx.prevSession } : {}),
-        ...(ctx.mcpServers ? { mcpServers: ctx.mcpServers } : {}),
+        ...(Object.keys(ctx.mcpServers).length ? { mcpServers: ctx.mcpServers } : {}),
       },
     })) {
       if (message.type === "system" && message.subtype === "init") {
@@ -92,7 +94,7 @@ export class Agent {
       }
     }
 
-    if (newSessionId) persistSession(this.name, newSessionId);
+    if (newSessionId && !this.cfg.memory === false) persistSession(this.name, newSessionId);
     return this._finalise(result, ctx.inputCtx, metadata);
   }
 
@@ -120,9 +122,10 @@ export class Agent {
       options: {
         systemPrompt: ctx.systemPrompt,
         allowedTools: ctx.allowedTools,
+        ...(this.cfg.model ? { model: this.cfg.model } : {}),
         includePartialMessages: true,
         ...(ctx.prevSession ? { resume: ctx.prevSession } : {}),
-        ...(ctx.mcpServers ? { mcpServers: ctx.mcpServers } : {}),
+        ...(Object.keys(ctx.mcpServers).length ? { mcpServers: ctx.mcpServers } : {}),
       },
     })) {
       if (message.type === "system" && message.subtype === "init") {
@@ -145,7 +148,7 @@ export class Agent {
       }
     }
 
-    if (newSessionId) persistSession(this.name, newSessionId);
+    if (newSessionId && !this.cfg.memory === false) persistSession(this.name, newSessionId);
     await this._finalise(fullResult, ctx.inputCtx, metadata);
   }
 
@@ -181,9 +184,10 @@ export class Agent {
       options: {
         systemPrompt: ctx.systemPrompt,
         allowedTools: ctx.allowedTools,
+        ...(this.cfg.model ? { model: this.cfg.model } : {}),
         outputFormat: { type: "json_schema", schema: jsonSchema },
         ...(ctx.prevSession ? { resume: ctx.prevSession } : {}),
-        ...(ctx.mcpServers ? { mcpServers: ctx.mcpServers } : {}),
+        ...(Object.keys(ctx.mcpServers).length ? { mcpServers: ctx.mcpServers } : {}),
       },
     })) {
       if (message.type === "system" && message.subtype === "init") {
@@ -196,7 +200,7 @@ export class Agent {
       }
     }
 
-    if (newSessionId) persistSession(this.name, newSessionId);
+    if (newSessionId && !this.cfg.memory === false) persistSession(this.name, newSessionId);
     await this._finalise(rawResult, ctx.inputCtx, metadata);
     return schema.parse(structuredOutput);
   }
@@ -285,15 +289,19 @@ export class Agent {
 
     const serverKey = `${this.name}-tools`;
     const server = buildMcpServer(this.name, allTools, []);
-    const mcpServers = server ? { [serverKey]: server } : undefined;
+
+    const mcpServers: Record<string, SdkMcpServerConfig> = {
+      ...(this.cfg.mcpServers ?? {}),
+      ...(server ? { [serverKey]: server } : {}),
+    };
 
     const mcpToolNames = allTools.map((t) => `mcp__${serverKey}__${t.name}`);
     const allowedTools = [
       ...new Set([...(this.cfg.allowedTools ?? []), ...mcpToolNames]),
     ];
 
-    // 6. Session
-    const prevSession = loadSessions()[this.name];
+    // 6. Session (skipped when stateless)
+    const prevSession = this.cfg.memory === false ? undefined : loadSessions()[this.name];
 
     return { inputCtx, systemPrompt, mcpServers, allowedTools, prevSession };
   }

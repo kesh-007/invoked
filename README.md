@@ -1,6 +1,6 @@
 # invoked
 
-Build Claude-powered agents, cron jobs, and webhook automations — no API key needed.
+Build Claude-powered agents — no API key needed.
 
 Runs on your existing **Claude Code** subscription. Authentication is handled automatically.
 
@@ -26,10 +26,10 @@ console.log(answer);
 
 ---
 
-## Peer dependencies
+## Install
 
 ```bash
-npm install @anthropic-ai/claude-agent-sdk @anthropic-ai/claude-code zod
+npm install invoked zod
 ```
 
 ---
@@ -43,10 +43,11 @@ npm install @anthropic-ai/claude-agent-sdk @anthropic-ai/claude-code zod
 | `generateObject()` | Typed structured output via Zod schemas |
 | Tools | Custom TypeScript functions Claude can call |
 | Skills | Delegate sub-tasks to specialised agents |
+| MCP servers | Connect to any MCP server — stdio or SSE |
 | Scratchpad | Opt-in internal notepad — agent tracks its own goal and notes |
-| Automations | Cron jobs + HTTP webhooks wired to agents |
+| Processors | Middleware pipeline to transform inputs and outputs |
 
-Agents are **stateless by default**. No history is stored between calls unless you opt in.
+Agents remember conversation history across calls by default. Set `memory: false` for one-shot tasks where history is irrelevant.
 
 ---
 
@@ -94,6 +95,23 @@ new Agent({
 });
 ```
 
+### Stateless agents
+
+Set `memory: false` for agents that should never load or save session history — every call is completely independent:
+
+```typescript
+const summarizer = new Agent({
+  name: "summarizer",
+  instructions: "Summarize the given text concisely.",
+  memory: false,
+});
+
+// Each call is fully independent — no history, no session written
+const summary = await summarizer.generate(longText);
+```
+
+Useful for summarization, classification, formatting, or any one-shot task.
+
 ### Scratchpad
 
 Enable the scratchpad when your agent needs to track its own goal and progress across a complex multi-step task:
@@ -106,8 +124,6 @@ const agent = new Agent({
   scratchpad: true,
 });
 ```
-
-When enabled, the agent automatically records its current goal and can write notes to itself via a built-in `remember` tool — preventing it from drifting on long tasks.
 
 ---
 
@@ -155,48 +171,69 @@ const orchestrator = new Agent({
 await orchestrator.generate("Research the latest TypeScript 6 news");
 ```
 
+### Loading skills from files
+
+Define skills as markdown files and load them at runtime:
+
+```markdown
+---
+name: researcher
+description: Searches the web and summarises findings
+allowedTools: ["WebSearch", "WebFetch"]
+scratchpad: true
 ---
 
-## Automations
-
-Wire agents to cron schedules and HTTP webhooks with a fluent builder:
-
-```typescript
-import { Agent, createAutomation, startAutomations } from "invoked";
-
-const reporter = new Agent({
-  name: "reporter",
-  instructions: "You write concise daily summary reports.",
-  allowedTools: ["Read", "Glob"],
-});
-
-// Run on a schedule
-createAutomation("daily-report")
-  .cron("0 9 * * 1-5")       // weekdays at 9 am
-  .agent(reporter)
-  .prompt("Summarise recent changes in ./src")
-  .start();
-
-// Receive HTTP webhooks
-createAutomation("github-pr")
-  .webhook("/github/pr", { method: "POST" })
-  .agent(codeReviewer)
-  .prompt((req) => `Review this PR: ${JSON.stringify(req.body)}`)
-  .start();
-
-// Custom handler with full control
-createAutomation("health")
-  .webhook("/health", { method: "GET" })
-  .run((_req, ctx) => ({ status: "ok", timestamp: ctx.triggeredAt }));
-
-// Boot everything
-await startAutomations({ port: 3000 });
+You are a research analyst. Search the web and summarise findings with cited sources.
 ```
 
-`startAutomations()` is smart about what it starts:
-- **Cron only** → no HTTP server, no port needed
-- **Webhooks** → starts HTTP server on `port`
-- **Both** → does both
+```typescript
+import { Agent, loadSkills } from "invoked";
+
+// Single file → array with one skill
+const skills = loadSkills("./skills/researcher.md");
+
+// Directory → all .md files loaded as skills
+const skills = loadSkills("./skills");
+
+const orchestrator = new Agent({
+  name: "orchestrator",
+  instructions: "Coordinate tasks using your skills.",
+  skills,
+});
+```
+
+---
+
+## MCP servers
+
+Connect agents to any [Model Context Protocol](https://modelcontextprotocol.io) server:
+
+```typescript
+// Stdio server (local process)
+const agent = new Agent({
+  name: "coder",
+  instructions: "You help with code tasks.",
+  mcpServers: {
+    filesystem: {
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "./src"],
+    },
+  },
+});
+
+// SSE server (remote HTTP)
+const agent = new Agent({
+  name: "assistant",
+  instructions: "You are a helpful assistant.",
+  mcpServers: {
+    myApi: {
+      type: "sse",
+      url: "https://my-mcp-server.com/sse",
+      headers: { Authorization: "Bearer my-token" },
+    },
+  },
+});
+```
 
 ---
 
@@ -236,10 +273,12 @@ const agent = new Agent({
 |---|---|---|---|
 | `name` | `string` | required | Unique agent name |
 | `instructions` | `string \| (ctx) => string` | required | System prompt |
+| `memory` | `boolean` | `true` | Set to `false` to disable session persistence — every call is fully independent |
 | `scratchpad` | `boolean` | `false` | Enable internal goal + notes tracking |
 | `allowedTools` | `string[]` | `[]` | Built-in Claude Code tools to allow |
 | `tools` | `ToolDef[]` | `[]` | Custom tools |
 | `skills` | `SkillDef[]` | `[]` | Sub-agents to delegate to |
+| `mcpServers` | `Record<string, McpServerConfig>` | `{}` | External MCP servers |
 | `inputPipeline` | `InputMiddleware[]` | `[]` | Pre-process the message |
 | `outputPipeline` | `OutputMiddleware[]` | `[]` | Post-process the result |
 
