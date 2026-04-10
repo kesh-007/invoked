@@ -1,6 +1,6 @@
 # invoked
 
-Build Claude-powered agents — no API key needed.
+Build Claude-powered agents and multi-agent pipelines — no API key needed.
 
 Runs on your existing **Claude Code** subscription. Authentication is handled automatically.
 
@@ -43,6 +43,8 @@ npm install invoked zod
 | `generateObject()` | Typed structured output via Zod schemas |
 | Tools | Custom TypeScript functions Claude can call |
 | Skills | Delegate sub-tasks to specialised agents |
+| **Orchestrator** | **Plan → execute workflow (parallel + sequential) → synthesize one conclusive answer** |
+| **Model router** | **Dynamically route tasks to the right model (opus / sonnet / haiku)** |
 | MCP servers | Connect to any MCP server — stdio or SSE |
 | Scratchpad | Opt-in internal notepad — agent tracks its own goal and notes |
 | Processors | Middleware pipeline to transform inputs and outputs |
@@ -204,6 +206,133 @@ const orchestrator = new Agent({
 
 ---
 
+## Multi-agent orchestration
+
+`Orchestrator` turns a single task into a coordinated multi-agent pipeline that runs in three automatic phases:
+
+1. **Plan** — a built-in planner LLM reads your task and your agents' descriptions, then produces a typed workflow: which agent does what, in what order, and whether each step runs in parallel or sequentially.
+2. **Execute** — runs the workflow exactly as planned. Parallel steps stream concurrently; sequential steps automatically receive the results of all prior steps as context.
+3. **Synthesize** — a built-in synthesizer LLM combines every agent's output into one coherent, conclusive answer.
+
+### Setup
+
+Add a `description` to each agent so the planner knows what it's good at:
+
+```typescript
+import { Agent, Orchestrator } from "invoked";
+
+const researcher = new Agent({
+  name: "researcher",
+  description: "Searches the web and returns key facts with sources",
+  instructions: "You are a research specialist. Return 3-5 key facts about the given topic.",
+  allowedTools: ["WebSearch", "WebFetch"],
+  memory: false,
+});
+
+const analyst = new Agent({
+  name: "analyst",
+  description: "Analyses information and identifies patterns or insights",
+  instructions: "You are a data analyst. Identify the 2-3 most important insights from the given information.",
+  memory: false,
+});
+
+const writer = new Agent({
+  name: "writer",
+  description: "Writes clear, engaging explanations for a general audience",
+  instructions: "You are a writer. Turn facts and insights into a polished 2-3 paragraph explanation.",
+  memory: false,
+});
+
+const orchestrator = new Orchestrator({
+  name: "content-pipeline",
+  agents: [researcher, analyst, writer],
+  plannerModel:     "claude-sonnet-4-6",
+  synthesizerModel: "claude-sonnet-4-6",
+});
+```
+
+### Streaming
+
+```typescript
+for await (const event of orchestrator.stream("Explain how the JS event loop works")) {
+  if (event.type === "plan") {
+    console.log("Workflow:", event.reasoning);
+    for (const s of event.steps)
+      console.log(`  • ${s.agent}  parallel=${s.runInParallel}`);
+  }
+
+  if (event.type === "agent_start")      console.log(`\n▶ [${event.agent}]`);
+  if (event.type === "agent_chunk")      process.stdout.write(event.chunk);
+  if (event.type === "agent_done")       console.log(`\n✓ [${event.agent}] done`);
+
+  if (event.type === "synthesizing")     console.log("\n— Synthesizing…");
+  if (event.type === "conclusion_chunk") process.stdout.write(event.chunk);
+
+  if (event.type === "done") {
+    console.log("\n\nPer-agent results:", event.results);
+    console.log("Final conclusion:", event.conclusion);
+  }
+}
+```
+
+### One-shot (non-streaming)
+
+```typescript
+const { results, conclusion } = await orchestrator.generate(
+  "Explain how the JS event loop works"
+);
+
+console.log(conclusion);
+// → one synthesized answer combining all agents' work
+
+console.log(results);
+// → { researcher: "…", analyst: "…", writer: "…" }
+```
+
+### Streaming events
+
+Every `orchestrator.stream(task)` call yields a sequence of typed events:
+
+| Event type | Fields | When |
+|---|---|---|
+| `"planning"` | `message` | Orchestration starts |
+| `"plan"` | `reasoning`, `steps[]` | Planner finished; each step has `agent`, `task`, `runInParallel` |
+| `"agent_start"` | `agent`, `task` | An agent begins its assigned task |
+| `"agent_chunk"` | `agent`, `chunk` | A streaming token from a running agent |
+| `"agent_done"` | `agent`, `result` | An agent finished; full output attached |
+| `"synthesizing"` | `message` | All agents done; synthesizer starting |
+| `"conclusion_chunk"` | `chunk` | A streaming token from the synthesizer |
+| `"conclusion"` | `result` | The complete synthesized answer |
+| `"done"` | `results`, `conclusion` | Everything complete |
+
+### Model router
+
+Optionally route each agent's sub-task to the best model based on what it needs to do:
+
+```typescript
+import { Orchestrator, defineModelRouter } from "invoked";
+
+const router = defineModelRouter(
+  [
+    // first match wins — string, RegExp, or async predicate
+    { match: /analyze|review|architect/i, model: "claude-opus-4-6"           },
+    { match: /write|draft|explain/i,      model: "claude-sonnet-4-6"         },
+    { match: /search|lookup|find/i,       model: "claude-haiku-4-5-20251001" },
+  ],
+  "claude-sonnet-4-6" // default when nothing matches
+);
+
+const orchestrator = new Orchestrator({
+  name: "routed-pipeline",
+  agents: [researcher, analyst, writer],
+  modelRouter: router,
+});
+```
+
+Each agent invocation resolves its task string against your routes at runtime — researcher gets haiku, analyst gets opus, writer gets sonnet.
+
+---
+
 ## MCP servers
 
 Connect agents to any [Model Context Protocol](https://modelcontextprotocol.io) server:
@@ -272,6 +401,7 @@ const agent = new Agent({
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `name` | `string` | required | Unique agent name |
+| `description` | `string` | — | What this agent does — used by the Orchestrator planner |
 | `instructions` | `string \| (ctx) => string` | required | System prompt |
 | `memory` | `boolean` | `true` | Set to `false` to disable session persistence — every call is fully independent |
 | `scratchpad` | `boolean` | `false` | Enable internal goal + notes tracking |
@@ -291,6 +421,39 @@ const agent = new Agent({
 | `generateObject(prompt, schema, metadata?)` | `Promise<z.infer<T>>` | Typed object |
 | `clearMemory()` | `void` | Clear scratchpad + session |
 | `asSkill(description)` | `SkillDef` | Expose as skill for another agent |
+| `withModel(model)` | `Agent` | New stateless agent with a different model |
+
+---
+
+### `new Orchestrator(config)`
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `name` | `string` | required | Orchestrator name |
+| `agents` | `Agent[]` | required | The agents available for task execution |
+| `plannerModel` | `string` | `"claude-sonnet-4-6"` | Model used for the planning step |
+| `synthesizerModel` | `string` | same as `plannerModel` | Model used for the final synthesis step |
+| `instructions` | `string` | — | Extra guidance appended to the planner's prompt |
+| `modelRouter` | `ModelRouter` | — | Dynamic model selector created with `defineModelRouter()` |
+
+### Orchestrator methods
+
+| Method | Returns | Description |
+|---|---|---|
+| `stream(task)` | `AsyncGenerator<OrchestratorEvent>` | Full orchestration with typed streaming events |
+| `generate(task)` | `Promise<{ results, conclusion }>` | Await the final conclusion + per-agent results |
+
+### `defineModelRouter(routes, defaultModel?)`
+
+```typescript
+defineModelRouter(
+  routes: Array<{
+    match: string | RegExp | ((task: string) => boolean | Promise<boolean>);
+    model: string;
+  }>,
+  defaultModel?: string   // fallback when no route matches
+): ModelRouter
+```
 
 ---
 

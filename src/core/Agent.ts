@@ -44,6 +44,11 @@ function dropSession(name: string) {
 export class Agent {
   readonly name: string;
 
+  /** Short description of this agent's purpose (set via config.description). */
+  get description(): string | undefined {
+    return this.cfg.description;
+  }
+
   private cfg: AgentConfig;
 
   /**
@@ -94,7 +99,7 @@ export class Agent {
       }
     }
 
-    if (newSessionId && !this.cfg.memory === false) persistSession(this.name, newSessionId);
+    if (newSessionId && this.cfg.memory !== false) persistSession(this.name, newSessionId);
     return this._finalise(result, ctx.inputCtx, metadata);
   }
 
@@ -148,7 +153,7 @@ export class Agent {
       }
     }
 
-    if (newSessionId && !this.cfg.memory === false) persistSession(this.name, newSessionId);
+    if (newSessionId && this.cfg.memory !== false) persistSession(this.name, newSessionId);
     await this._finalise(fullResult, ctx.inputCtx, metadata);
   }
 
@@ -180,7 +185,7 @@ export class Agent {
     let newSessionId: string | undefined;
 
     for await (const message of query({
-      prompt: ctx.inputCtx.message,
+      prompt: ctx.inputCtx.message + "\n\n" + this._buildJsonSchemaPrompt(jsonSchema),
       options: {
         systemPrompt: ctx.systemPrompt,
         allowedTools: ctx.allowedTools,
@@ -193,15 +198,81 @@ export class Agent {
       if (message.type === "system" && message.subtype === "init") {
         newSessionId = (message as Record<string, unknown>).session_id as string;
       }
-      if ("result" in message) {
+
+      // Handle stream events
+      if (message.type === "stream_event") {
+        const event = (message as Record<string, unknown>).event as Record<string, unknown>;
+        // For JSON schema, handle both text and json deltas
+        if (event?.type === "content_block_delta") {
+          const delta = event.delta as Record<string, unknown>;
+          if (delta?.type === "text_delta") {
+            const text = delta.text as string;
+            if (text) rawResult += text;
+          } else if (delta?.type === "json_delta") {
+            // Handle JSON delta for structured output
+            const json = delta.partial_json as string;
+            if (json) rawResult = json;
+          }
+        }
+      }
+
+      // Try to extract structured output from message properties
+      if ("result" in message || "structured_output" in message || "content" in message) {
         const msg = message as Record<string, unknown>;
-        structuredOutput = msg.structured_output;
-        rawResult = (msg.result as string) ?? "";
+        if (msg.structured_output !== undefined) {
+          structuredOutput = msg.structured_output;
+        }
+        if (msg.result !== undefined) {
+          rawResult = (msg.result as string) ?? rawResult;
+        }
+        // Check if content blocks exist (alternative message structure)
+        if (Array.isArray(msg.content)) {
+          for (const block of msg.content) {
+            const blockObj = block as Record<string, unknown>;
+            if (blockObj.type === "text" && typeof blockObj.text === "string") {
+              rawResult = blockObj.text;
+            } else if (blockObj.type === "json" && blockObj.json !== undefined) {
+              structuredOutput = blockObj.json;
+            }
+          }
+        }
       }
     }
 
-    if (newSessionId && !this.cfg.memory === false) persistSession(this.name, newSessionId);
+    if (newSessionId && this.cfg.memory !== false) persistSession(this.name, newSessionId);
     await this._finalise(rawResult, ctx.inputCtx, metadata);
+    
+    // If structuredOutput wasn't set from message, try parsing from rawResult as JSON
+    if (structuredOutput === undefined) {
+      if (rawResult) {
+        try {
+          // First, try direct JSON parse
+          structuredOutput = JSON.parse(rawResult);
+        } catch {
+          // Try to extract JSON from markdown code blocks
+          let jsonString = rawResult;
+          const markdownJsonMatch = rawResult.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+          if (markdownJsonMatch) {
+            jsonString = markdownJsonMatch[1].trim();
+          }
+          
+          // Try to extract JSON object pattern
+          const jsonMatch = jsonString.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            try {
+              structuredOutput = JSON.parse(jsonMatch[0]);
+            } catch {
+              throw new Error(`Failed to parse JSON: ${jsonMatch[0].slice(0, 200)}`);
+            }
+          } else {
+            throw new Error(`No JSON found in response: ${rawResult.slice(0, 200)}`);
+          }
+        }
+      } else {
+        throw new Error("No response received from query");
+      }
+    }
+    
     return schema.parse(structuredOutput);
   }
 
@@ -212,6 +283,14 @@ export class Agent {
     this._scratchpad?.clear();
     dropSession(this.name);
     console.log(`[${this.name}] Memory cleared.`);
+  }
+
+  /**
+   * Return a new stateless Agent identical to this one but using a different model.
+   * Useful for the Orchestrator's model router to override models per-invocation.
+   */
+  withModel(model: string): Agent {
+    return new Agent({ ...this.cfg, model, memory: false });
   }
 
   /**
@@ -227,6 +306,20 @@ export class Agent {
   }
 
   // ── private ────────────────────────────────────────────────────────────────
+
+  private _buildJsonSchemaPrompt(schema: Record<string, unknown>): string {
+    return `IMPORTANT: You must respond ONLY with valid JSON matching this exact schema. No markdown, no explanation, just the JSON object:
+
+${JSON.stringify(schema, null, 2)}
+
+Required fields: ${this._extractRequiredFields(schema).join(", ") || "all fields"}
+Return ONLY the JSON object, nothing else.`;
+  }
+
+  private _extractRequiredFields(schema: Record<string, unknown>): string[] {
+    const required = schema.required;
+    return Array.isArray(required) ? required.map(f => String(f)) : [];
+  }
 
   private async _buildContext(prompt: string, metadata: Record<string, unknown>) {
     // 1. Track current goal in scratchpad (only when enabled)

@@ -83,10 +83,66 @@ export type McpSseServerConfig = {
 
 export type McpServerConfig = McpStdioServerConfig | McpSseServerConfig;
 
+// ─── Model Router ─────────────────────────────────────────────────────────────
+
+/**
+ * A single routing rule: if `match` returns true for a task string, use `model`.
+ * Evaluated in order — first match wins.
+ */
+export interface ModelRoute {
+  /** String (substring), RegExp, or async predicate */
+  match: string | RegExp | ((task: string) => boolean | Promise<boolean>);
+  /** Full model ID or alias: 'claude-opus-4-6' | 'claude-sonnet-4-6' | 'claude-haiku-4-5-20251001' */
+  model: string;
+  /** Optional human-readable label */
+  label?: string;
+}
+
+/** A function that maps a task string to the appropriate model ID. */
+export type ModelRouter = (task: string) => Promise<string>;
+
+// ─── Orchestrator ─────────────────────────────────────────────────────────────
+
+export interface PlannedStep {
+  agent: string;
+  task: string;
+  runInParallel: boolean;
+}
+
+export type OrchestratorEvent =
+  | { type: "planning"; message: string }
+  | { type: "plan"; reasoning: string; steps: PlannedStep[] }
+  | { type: "agent_start"; agent: string; task: string }
+  | { type: "agent_chunk"; agent: string; chunk: string }
+  | { type: "agent_done"; agent: string; result: string }
+  | { type: "synthesizing"; message: string }
+  | { type: "conclusion_chunk"; chunk: string }
+  | { type: "conclusion"; result: string }
+  | { type: "done"; results: Record<string, string>; conclusion: string };
+
+export interface OrchestratorConfig {
+  name: string;
+  /** The agents available to the orchestrator for task execution */
+  agents: import("./Agent").Agent[];
+  /** Extra guidance appended to the planner's system prompt */
+  instructions?: string;
+  /** Model for the planning step. Defaults to "claude-sonnet-4-6". */
+  plannerModel?: string;
+  /** Model for the final synthesis/conclusion step. Defaults to plannerModel or "claude-sonnet-4-6". */
+  synthesizerModel?: string;
+  /**
+   * Dynamic model router — maps each agent's task string to the best model.
+   * Create one with `defineModelRouter()`.
+   */
+  modelRouter?: ModelRouter;
+}
+
 // ─── Agent Config ─────────────────────────────────────────────────────────────
 
 export interface AgentConfig {
   name: string;
+  /** Short description of what this agent does. Used by the Orchestrator's planner. */
+  description?: string;
   instructions: string | ((ctx: InputContext) => string);
 
   /**
